@@ -1,10 +1,18 @@
-const notes = [
-    { title: "Crypto Basics", course: "Cryptography", section: "A" },
-    { title: "Network Attacks", course: "Network Security", section: "B" },
-    { title: "Ethical Hacking Intro", course: "Ethical Hacking", section: "C" }
-];
-
 const container = document.getElementById("notesContainer");
+
+async function fetchNotes(search = '', section = '', course = '') {
+    const params = new URLSearchParams();
+    if (search) params.append('search', search);
+    if (section) params.append('section', section);
+    if (course) params.append('course', course);
+
+    const response = await fetch(`/api/notes?${params}`);
+    if (!response.ok) {
+        console.error('Failed to fetch notes');
+        return [];
+    }
+    return await response.json();
+}
 
 function displayNotes(data) {
     container.innerHTML = "";
@@ -27,37 +35,52 @@ function displayNotes(data) {
         const section = document.createElement("p");
         section.textContent = "Section: " + note.section;
 
-        const button = document.createElement("button");
-        button.textContent = "Download";
-        button.onclick = () => {
-            alert("Download feature will work after backend connection");
-        };
-
         card.appendChild(title);
         card.appendChild(course);
         card.appendChild(section);
-        card.appendChild(button);
+
+        if (note.file) {
+            const button = document.createElement("button");
+            button.textContent = "Download";
+            button.onclick = () => {
+                const link = document.createElement('a');
+                link.href = `/api/notes/${note.id}/download`;
+                link.download = note.file;
+                link.click();
+            };
+            card.appendChild(button);
+        }
 
         container.appendChild(card);
     });
 }
 
 // initial load
-displayNotes(notes);
+async function loadNotes() {
+    try {
+        const data = await fetchNotes();
+        displayNotes(data);
+    } catch (error) {
+        console.error('Failed to load notes', error);
+        container.innerHTML = "<p style='text-align:center;'>Failed to load notes</p>";
+    }
+}
+
+loadNotes();
 
 // filtering
-function filterNotes() {
+async function filterNotes() {
     const search = document.getElementById("search").value.toLowerCase();
     const section = document.getElementById("sectionFilter").value;
     const course = document.getElementById("courseFilter").value;
 
-    const filtered = notes.filter(note =>
-        note.title.toLowerCase().includes(search) &&
-        (section === "" || note.section === section) &&
-        (course === "" || note.course === course)
-    );
-
-    displayNotes(filtered);
+    try {
+        const data = await fetchNotes(search, section, course);
+        displayNotes(data);
+    } catch (error) {
+        console.error('Failed to filter notes', error);
+        container.innerHTML = "<p style='text-align:center;'>Failed to filter notes</p>";
+    }
 }
 
 // event listeners (safe binding)
@@ -66,7 +89,7 @@ document.getElementById("sectionFilter").addEventListener("change", filterNotes)
 document.getElementById("courseFilter").addEventListener("change", filterNotes);
 
 // upload form
-document.getElementById("uploadForm").addEventListener("submit", function(e) {
+document.getElementById("uploadForm").addEventListener("submit", async function(e) {
     e.preventDefault();
 
     const title = document.getElementById("title").value.trim();
@@ -79,12 +102,29 @@ document.getElementById("uploadForm").addEventListener("submit", function(e) {
         return;
     }
 
-    // simulate adding note
-    notes.push({ title, course, section });
+    const formData = new FormData();
+    formData.append('title', title);
+    formData.append('course', course);
+    formData.append('section', section);
+    formData.append('file', file);
 
-    displayNotes(notes);
+    try {
+        const response = await fetch('/api/notes', {
+            method: 'POST',
+            body: formData
+        });
 
-    alert("Note uploaded successfully (demo)");
-
-    this.reset();
+        if (response.ok) {
+            const newNote = await response.json();
+            alert("Note uploaded successfully");
+            this.reset();
+            loadNotes(); // reload notes
+        } else {
+            const error = await response.json();
+            alert("Error: " + error.error);
+        }
+    } catch (error) {
+        console.error('Upload failed', error);
+        alert("Upload failed");
+    }
 });
