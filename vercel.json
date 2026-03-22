@@ -1,5 +1,6 @@
 {
   "version": 2,
+  "outputDirectory": ".",
   "rewrites": [
     {
       "source": "/api/notes/:id/download",
@@ -8,7 +9,6 @@
   ],
   "functions": {
     "api/**/*.js": {
-      "runtime": "nodejs22.x",
       "maxDuration": 10
     }
   }
