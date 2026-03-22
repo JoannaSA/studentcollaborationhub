@@ -1,16 +1,26 @@
-const INITIAL_NOTES = [
-  { id: 1, title: "Crypto Basics", course: "Cryptography", section: "A", file: null },
-  { id: 2, title: "C Programming", course: "C Programming", section: "B", file: null },
-  { id: 3, title: "Cyber Security Essentials", course: "Cyber Security Essentials", section: "C", file: null }
-];
-
-const store = globalThis.__notesStore || {
-  uploaded: [],
-  nextId: INITIAL_NOTES.length + 1
-};
-globalThis.__notesStore = store;
+const { createClient } = require("@supabase/supabase-js");
+const { randomUUID } = require("node:crypto");
 
 const MAX_FILE_SIZE_BYTES = 4 * 1024 * 1024;
+const SUPABASE_TABLE = process.env.SUPABASE_NOTES_TABLE || "notes";
+const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || "notes-files";
+
+function getSupabaseClient() {
+  const url = process.env.SUPABASE_URL;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!url || !serviceRoleKey) {
+    return null;
+  }
+
+  if (!globalThis.__supabaseClient) {
+    globalThis.__supabaseClient = createClient(url, serviceRoleKey, {
+      auth: { autoRefreshToken: false, persistSession: false }
+    });
+  }
+
+  return globalThis.__supabaseClient;
+}
 
 function setCommonHeaders(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -40,6 +50,10 @@ function getQuery(req) {
 
 function normalizeText(value) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function sanitizeFileName(fileName) {
+  return normalizeText(fileName).replace(/[^a-zA-Z0-9._ -]/g, "_");
 }
 
 function normalizeBase64(data) {
@@ -99,51 +113,104 @@ function toPublicNote(note) {
     title: note.title,
     course: note.course,
     section: note.section,
-    file: note.fileName || note.file || null
+    file: note.file_name || note.fileName || note.file || null
   };
 }
 
-function listNotes(query, res) {
+async function listNotes(query, res) {
+  const supabase = getSupabaseClient();
+  if (!supabase) {
+    return sendJson(res, 500, {
+      error: "Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY."
+    });
+  }
+
   const search = normalizeText(query.search).toLowerCase();
   const section = normalizeText(query.section);
   const course = normalizeText(query.course);
 
-  const mergedNotes = INITIAL_NOTES.concat(store.uploaded);
-  const filtered = mergedNotes.filter((note) => {
-    return (
-      note.title.toLowerCase().includes(search) &&
-      (!section || note.section === section) &&
-      (!course || note.course === course)
-    );
-  });
+  let dbQuery = supabase
+    .from(SUPABASE_TABLE)
+    .select("id,title,course,section,file_name")
+    .order("id", { ascending: true });
 
-  sendJson(res, 200, filtered.map(toPublicNote));
+  if (search) {
+    dbQuery = dbQuery.ilike("title", `%${search}%`);
+  }
+
+  if (section) {
+    dbQuery = dbQuery.eq("section", section);
+  }
+
+  if (course) {
+    dbQuery = dbQuery.eq("course", course);
+  }
+
+  const { data, error } = await dbQuery;
+  if (error) {
+    console.error("Supabase list error:", error.message);
+    return sendJson(res, 500, { error: "Could not load notes" });
+  }
+
+  return sendJson(res, 200, (data || []).map(toPublicNote));
 }
 
-function downloadNote(query, res) {
+async function readStorageFileAsBuffer(fileData) {
+  if (!fileData) return null;
+  if (Buffer.isBuffer(fileData)) return fileData;
+  if (typeof fileData.arrayBuffer === "function") {
+    const arrayBuffer = await fileData.arrayBuffer();
+    return Buffer.from(arrayBuffer);
+  }
+
+  return null;
+}
+
+async function downloadNote(query, res) {
+  const supabase = getSupabaseClient();
+  if (!supabase) {
+    return sendJson(res, 500, {
+      error: "Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY."
+    });
+  }
+
   const id = Number(query.download);
   if (!Number.isInteger(id)) {
     return sendJson(res, 400, { error: "Invalid download id" });
   }
 
-  const note = store.uploaded.find((item) => item.id === id);
-  if (!note || !note.fileData) {
+  const { data: note, error: noteError } = await supabase
+    .from(SUPABASE_TABLE)
+    .select("id,file_name,file_path,file_type")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (noteError) {
+    console.error("Supabase fetch note error:", noteError.message);
+    return sendJson(res, 500, { error: "Could not fetch file metadata" });
+  }
+
+  if (!note || !note.file_path) {
     return sendJson(res, 404, { error: "File not found" });
   }
 
-  let fileBuffer;
-  try {
-    fileBuffer = Buffer.from(note.fileData, "base64");
-  } catch {
-    return sendJson(res, 500, { error: "Stored file is invalid" });
+  const { data: fileData, error: fileError } = await supabase.storage.from(SUPABASE_BUCKET).download(note.file_path);
+  if (fileError) {
+    console.error("Supabase download error:", fileError.message);
+    return sendJson(res, 404, { error: "File not found" });
   }
 
-  const fileName = (note.fileName || "note-file").replace(/[^a-zA-Z0-9._ -]/g, "_");
+  const fileBuffer = await readStorageFileAsBuffer(fileData);
+  if (!fileBuffer) {
+    return sendJson(res, 500, { error: "Could not process file from storage" });
+  }
+
+  const fileName = sanitizeFileName(note.file_name) || "note-file";
   res.statusCode = 200;
-  res.setHeader("Content-Type", note.fileType || "application/octet-stream");
+  res.setHeader("Content-Type", note.file_type || "application/octet-stream");
   res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
   res.setHeader("Content-Length", String(fileBuffer.length));
-  res.end(fileBuffer);
+  return res.end(fileBuffer);
 }
 
 function validateBase64Content(base64String) {
@@ -158,7 +225,14 @@ function validateBase64Content(base64String) {
   }
 }
 
-function createNote(body, res) {
+async function createNote(body, res) {
+  const supabase = getSupabaseClient();
+  if (!supabase) {
+    return sendJson(res, 500, {
+      error: "Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY."
+    });
+  }
+
   const title = normalizeText(body.title);
   const course = normalizeText(body.course);
   const section = normalizeText(body.section);
@@ -179,19 +253,39 @@ function createNote(body, res) {
     return sendJson(res, 413, { error: "File too large. Max size is 4 MB." });
   }
 
-  const safeFileName = fileName.replace(/[^a-zA-Z0-9._ -]/g, "_");
-  const note = {
-    id: store.nextId++,
-    title,
-    course,
-    section,
-    fileName: safeFileName,
-    fileType,
-    fileData
-  };
+  const safeFileName = sanitizeFileName(fileName) || "upload.bin";
+  const filePath = `${Date.now()}-${randomUUID()}-${safeFileName}`;
 
-  store.uploaded.push(note);
-  return sendJson(res, 201, toPublicNote(note));
+  const { error: uploadError } = await supabase.storage.from(SUPABASE_BUCKET).upload(filePath, decodedFile, {
+    contentType: fileType,
+    upsert: false
+  });
+
+  if (uploadError) {
+    console.error("Supabase upload error:", uploadError.message);
+    return sendJson(res, 500, { error: "Could not upload file to Supabase Storage" });
+  }
+
+  const { data, error: insertError } = await supabase
+    .from(SUPABASE_TABLE)
+    .insert({
+      title,
+      course,
+      section,
+      file_name: safeFileName,
+      file_path: filePath,
+      file_type: fileType
+    })
+    .select("id,title,course,section,file_name")
+    .single();
+
+  if (insertError) {
+    console.error("Supabase insert error:", insertError.message);
+    await supabase.storage.from(SUPABASE_BUCKET).remove([filePath]);
+    return sendJson(res, 500, { error: "Could not save note metadata" });
+  }
+
+  return sendJson(res, 201, toPublicNote(data));
 }
 
 module.exports = async (req, res) => {
