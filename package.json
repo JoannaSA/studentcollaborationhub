@@ -1,0 +1,16 @@
+{
+  "name": "studentcollaborationhub",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Student Collaboration Hub - static frontend with Vercel serverless API",
+  "scripts": {
+    "start": "npx vercel dev",
+    "deploy": "npx vercel --prod",
+    "build": "echo \"No build step configured\"",
+    "test": "echo \"No tests configured\"",
+    "dev": "npx vercel dev"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
